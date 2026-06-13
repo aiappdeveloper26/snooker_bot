@@ -1,0 +1,23 @@
+# Render deployment config for the Snooker Tracker bot.
+#
+# Deploys as a FREE "Web Service". The bot includes a tiny built-in HTTP
+# server so Render sees a port bound (this is required for the free tier).
+#
+# CAVEAT: free Web Services have a temporary disk and spin down after
+# ~15 minutes of no HTTP traffic. That means:
+#   1. snooker_data.json resets whenever the service restarts/redeploys.
+#   2. Use a free pinger like uptimerobot.com pointed at your Render URL
+#      every 5 minutes to keep the bot from sleeping.
+
+services:
+  - type: web
+    name: snooker-bot
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python snooker_bot.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false   # set this manually in the Render dashboard (Environment tab)
+      - key: PYTHON_VERSION
+        value: "3.12.8"
