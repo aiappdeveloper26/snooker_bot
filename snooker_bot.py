@@ -32,6 +32,7 @@ Environment variables:
 import json
 import logging
 import os
+import re
 import threading
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -63,7 +64,7 @@ DATA_FILE = os.environ.get("DATA_FILE", "snooker_data.json")
     SELECT_DATE,
     ENTER_DATE,
     SELECT_OPENER,
-    SELECT_WINNER,
+    ENTER_SCORE,
     ASK_BREAK,
     SELECT_BREAK_PLAYER,
     ENTER_BREAK_VALUE,
@@ -103,12 +104,17 @@ def start_web_server():
 #     "friends": ["Alice", "Bob"],
 #     "frames": [
 #        {"friend": "Alice", "date": "2026-06-13", "opener": "me",
-#         "winner": "me", "break_player": "me", "break_value": 45},
+#         "my_score": 2, "friend_score": 2,
+#         "break_player": "me", "break_value": 45},
 #        ...
 #     ]
 #   },
 #   ...
 # }
+#
+# Each entry in "frames" is actually a *session* result entered as a frame
+# score (e.g. "2:2" means you won 2 frames and your friend won 2 frames in
+# that session).
 #
 # Every Telegram user who talks to the bot gets their own "friends" list and
 # "frames" history, keyed by their Telegram user id.
@@ -180,24 +186,31 @@ def get_history(data: dict, owner_id: int, friend: str = None, limit: int = 10):
 
 
 def get_h2h(data: dict, owner_id: int, friend: str) -> dict:
-    frames = [f for f in get_owner(data, owner_id)["frames"] if f["friend"].lower() == friend.lower()]
-    total = len(frames)
-    me_wins = sum(1 for f in frames if f["winner"] == "me")
-    friend_wins = total - me_wins
+    sessions = [f for f in get_owner(data, owner_id)["frames"] if f["friend"].lower() == friend.lower()]
+    sessions_count = len(sessions)
 
-    opener_me_total = sum(1 for f in frames if f["opener"] == "me")
-    opener_me_wins = sum(1 for f in frames if f["opener"] == "me" and f["winner"] == "me")
+    me_wins = sum(f["my_score"] for f in sessions)
+    friend_wins = sum(f["friend_score"] for f in sessions)
+    total = me_wins + friend_wins
+
+    opener_me_total = sum(f["my_score"] + f["friend_score"] for f in sessions if f["opener"] == "me")
+    opener_me_wins = sum(f["my_score"] for f in sessions if f["opener"] == "me")
     opener_friend_total = total - opener_me_total
     opener_friend_wins = me_wins - opener_me_wins
 
-    my_breaks = [f["break_value"] for f in frames if f.get("break_player") == "me" and f.get("break_value") is not None]
-    friend_breaks = [f["break_value"] for f in frames if f.get("break_player") == "friend" and f.get("break_value") is not None]
+    my_breaks = [f["break_value"] for f in sessions if f.get("break_player") == "me" and f.get("break_value") is not None]
+    friend_breaks = [f["break_value"] for f in sessions if f.get("break_player") == "friend" and f.get("break_value") is not None]
 
-    recent = _sorted_frames(frames)[:5]
-    recent_form = "".join("W" if f["winner"] == "me" else "L" for f in recent)
+    # Recent form: per-session result (W/L/D based on my_score vs friend_score)
+    recent = _sorted_frames(sessions)[:5]
+    recent_form = "".join(
+        "W" if f["my_score"] > f["friend_score"] else ("L" if f["my_score"] < f["friend_score"] else "D")
+        for f in recent
+    )
 
     return {
         "friend_name": friend,
+        "sessions": sessions_count,
         "total": total,
         "me_wins": me_wins,
         "friend_wins": friend_wins,
@@ -212,19 +225,22 @@ def get_h2h(data: dict, owner_id: int, friend: str) -> dict:
 
 
 def get_overall_stats(data: dict, owner_id: int) -> dict:
-    frames = get_owner(data, owner_id)["frames"]
-    total = len(frames)
-    me_wins = sum(1 for f in frames if f["winner"] == "me")
+    sessions = get_owner(data, owner_id)["frames"]
+    sessions_count = len(sessions)
+    me_wins = sum(f["my_score"] for f in sessions)
+    friend_wins = sum(f["friend_score"] for f in sessions)
+    total = me_wins + friend_wins
 
     breakdown_map = {}
-    for f in frames:
-        b = breakdown_map.setdefault(f["friend"], {"total": 0, "me_wins": 0})
-        b["total"] += 1
-        if f["winner"] == "me":
-            b["me_wins"] += 1
+    for f in sessions:
+        b = breakdown_map.setdefault(f["friend"], {"sessions": 0, "total": 0, "me_wins": 0})
+        b["sessions"] += 1
+        b["total"] += f["my_score"] + f["friend_score"]
+        b["me_wins"] += f["my_score"]
     breakdown = [
         {
             "name": name,
+            "sessions": v["sessions"],
             "total": v["total"],
             "me_wins": v["me_wins"],
             "friend_wins": v["total"] - v["me_wins"],
@@ -233,15 +249,16 @@ def get_overall_stats(data: dict, owner_id: int) -> dict:
     ]
 
     best_break = None
-    for f in frames:
+    for f in sessions:
         if f.get("break_value") is not None:
             if best_break is None or f["break_value"] > best_break["break_value"]:
                 best_break = f
 
     return {
+        "sessions": sessions_count,
         "total": total,
         "me_wins": me_wins,
-        "friend_wins": total - me_wins,
+        "friend_wins": friend_wins,
         "breakdown": breakdown,
         "best_break": best_break,
     }
@@ -302,13 +319,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\U0001F3B1 *Snooker Tracker Bot*\n\n"
         "I'll help you keep track of your snooker results against your friends.\n\n"
         "*Commands:*\n"
-        "/record - record a new frame result\n"
+        "/record - record a session's frame score (e.g. 2:2)\n"
         "/h2h - head-to-head stats vs a friend\n"
         "/stats - your overall stats\n"
-        "/history - recent frame history\n"
+        "/history - recent session history\n"
         "/friends - list saved friends\n"
         "/delfriend - remove a friend & their records\n"
-        "/undo - delete the last recorded frame\n"
+        "/undo - delete the last recorded session\n"
         "/cancel - cancel current action"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -335,7 +352,7 @@ async def record_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = friends_keyboard(owner_id, prefix="rf", include_new=True)
     if kb is None:
         await update.message.reply_text(
-            "Let's record a frame! \U0001F3B1\nYou don't have any friends saved yet - "
+            "Let's record a result! \U0001F3B1\nYou don't have any friends saved yet - "
             "what's your opponent's name?"
         )
         return NEW_FRIEND_NAME
@@ -413,7 +430,7 @@ async def ask_opener(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"Date: *{context.user_data['match_date']}*\n"
         f"Opponent: *{friend_name}*\n\n"
-        "Who broke first (opened the frame)?"
+        "Who broke first (opened the first frame)?"
     )
     kb = two_choice_keyboard("opener", friend_name)
     if hasattr(update_or_query, "edit_message_text"):
@@ -430,19 +447,39 @@ async def opener_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     friend_name = context.user_data["friend_name"]
     await query.edit_message_text(
-        "Who won this frame?",
-        reply_markup=two_choice_keyboard("winner", friend_name),
+        f"What was the frame score?\n"
+        f"Reply in the format *your frames : {friend_name}'s frames*, e.g. `2:2`",
+        parse_mode="Markdown",
     )
-    return SELECT_WINNER
+    return ENTER_SCORE
 
 
-async def winner_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["winner"] = query.data.split(":")[1]
+SCORE_PATTERN = re.compile(r"^\s*(\d+)\s*[:\-]\s*(\d+)\s*$")
 
-    await query.edit_message_text(
-        "Was there a notable highest break in this frame? (optional)",
+
+async def score_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    match = SCORE_PATTERN.match(text)
+    if not match:
+        await update.message.reply_text(
+            "Please enter the score as `your frames : their frames`, e.g. `2:2` or `3-1`.",
+            parse_mode="Markdown",
+        )
+        return ENTER_SCORE
+
+    my_score, friend_score = int(match.group(1)), int(match.group(2))
+    if my_score == 0 and friend_score == 0:
+        await update.message.reply_text(
+            "At least one frame must have been played. Please enter a score like `2:2`.",
+            parse_mode="Markdown",
+        )
+        return ENTER_SCORE
+
+    context.user_data["my_score"] = my_score
+    context.user_data["friend_score"] = friend_score
+
+    await update.message.reply_text(
+        "Was there a notable highest break in this session? (optional)",
         reply_markup=yes_no_keyboard("hasbreak"),
     )
     return ASK_BREAK
@@ -497,7 +534,8 @@ async def save_frame_and_ask_more(update_or_query, context: ContextTypes.DEFAULT
         "friend": ud["friend_name"],
         "date": ud["match_date"],
         "opener": ud["opener"],
-        "winner": ud["winner"],
+        "my_score": ud["my_score"],
+        "friend_score": ud["friend_score"],
         "break_player": ud.get("break_player"),
         "break_value": ud.get("break_value"),
     }
@@ -507,11 +545,11 @@ async def save_frame_and_ask_more(update_or_query, context: ContextTypes.DEFAULT
 
     summary = build_frame_summary(ud)
 
-    # Reset per-frame fields, keep friend & date for a possible next frame
-    for key in ("opener", "winner", "break_player", "break_value"):
+    # Reset per-session fields, keep friend & date for a possible next session
+    for key in ("opener", "my_score", "friend_score", "break_player", "break_value"):
         ud.pop(key, None)
 
-    text = f"\u2705 Frame saved!\n\n{summary}\n\nAdd another frame for the same date & opponent?"
+    text = f"\u2705 Result saved!\n\n{summary}\n\nAdd another session for the same date & opponent?"
     kb = yes_no_keyboard("more")
 
     if hasattr(update_or_query, "edit_message_text"):
@@ -524,12 +562,11 @@ async def save_frame_and_ask_more(update_or_query, context: ContextTypes.DEFAULT
 def build_frame_summary(ud: dict) -> str:
     friend_name = ud["friend_name"]
     opener = "You" if ud["opener"] == "me" else friend_name
-    winner = "You" if ud["winner"] == "me" else friend_name
     lines = [
         f"\U0001F4C5 Date: {ud['match_date']}",
         f"\U0001F19A Opponent: {friend_name}",
         f"\u25B6\uFE0F Opened: {opener}",
-        f"\U0001F3C6 Winner: {winner}",
+        f"\U0001F3C6 Score: You {ud['my_score']} - {ud['friend_score']} {friend_name}",
     ]
     if ud.get("break_value") is not None:
         bp = "You" if ud["break_player"] == "me" else friend_name
@@ -580,9 +617,10 @@ async def h2h_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [
         f"\U0001F3B1 *Head-to-head vs {stats['friend_name']}*",
         "",
+        f"Sessions played: {stats['sessions']}",
         f"Frames played: {stats['total']}",
-        f"Your wins: {stats['me_wins']}",
-        f"{stats['friend_name']}'s wins: {stats['friend_wins']}",
+        f"Your frame wins: {stats['me_wins']}",
+        f"{stats['friend_name']}'s frame wins: {stats['friend_wins']}",
         f"Your win rate: {win_pct:.1f}%",
     ]
 
@@ -636,16 +674,18 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [
         "\U0001F4CA *Overall stats*",
         "",
+        f"Sessions recorded: {stats['sessions']}",
         f"Total frames played: {stats['total']}",
-        f"Your wins: {stats['me_wins']} ({win_pct:.1f}%)",
-        f"Your losses: {stats['friend_wins']}",
+        f"Your frame wins: {stats['me_wins']} ({win_pct:.1f}%)",
+        f"Your frame losses: {stats['friend_wins']}",
         "",
         "*By opponent:*",
     ]
     for row in stats["breakdown"]:
         pct = row["me_wins"] / row["total"] * 100 if row["total"] else 0
         lines.append(
-            f"\u2022 {row['name']}: {row['me_wins']}-{row['friend_wins']} ({pct:.0f}% win rate, {row['total']} frames)"
+            f"\u2022 {row['name']}: {row['me_wins']}-{row['friend_wins']} "
+            f"({pct:.0f}% frame win rate, {row['sessions']} sessions, {row['total']} frames)"
         )
 
     if stats["best_break"]:
@@ -672,11 +712,10 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No frames recorded yet. Use /record to log your first one!")
         return
 
-    lines = ["\U0001F551 *Last 10 frames:*", ""]
+    lines = ["\U0001F551 *Last 10 sessions:*", ""]
     for r in rows:
         opener = "You" if r["opener"] == "me" else r["friend"]
-        winner = "You" if r["winner"] == "me" else r["friend"]
-        line = f"{r['date']} vs {r['friend']}: {winner} won (opened: {opener})"
+        line = f"{r['date']} vs {r['friend']}: You {r['my_score']} - {r['friend_score']} (opened: {opener})"
         if r.get("break_value") is not None:
             bp = "You" if r["break_player"] == "me" else r["friend"]
             line += f", break {r['break_value']} ({bp})"
@@ -744,10 +783,10 @@ async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("There's nothing to undo.")
         return
     save_data(data)
-    winner = "You" if deleted["winner"] == "me" else deleted["friend"]
     await update.message.reply_text(
-        f"\u21A9\uFE0F Removed the last frame:\n"
-        f"{deleted['date']} vs {deleted['friend']} - winner: {winner}"
+        f"\u21A9\uFE0F Removed the last session:\n"
+        f"{deleted['date']} vs {deleted['friend']} - "
+        f"You {deleted['my_score']} - {deleted['friend_score']} {deleted['friend']}"
     )
 
 
@@ -776,7 +815,7 @@ def main():
             SELECT_DATE: [CallbackQueryHandler(date_selected, pattern=r"^date:")],
             ENTER_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, date_entered)],
             SELECT_OPENER: [CallbackQueryHandler(opener_selected, pattern=r"^opener:")],
-            SELECT_WINNER: [CallbackQueryHandler(winner_selected, pattern=r"^winner:")],
+            ENTER_SCORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, score_entered)],
             ASK_BREAK: [CallbackQueryHandler(ask_break_response, pattern=r"^hasbreak:")],
             SELECT_BREAK_PLAYER: [
                 CallbackQueryHandler(break_player_selected, pattern=r"^breakplayer:")

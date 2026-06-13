@@ -146,22 +146,23 @@ Send `/start`, then `/record` to log your first frame.
   (tap Today)
 > Who broke first?  [Me] [Alice]
   (tap Me)
-> Who won this frame?  [Me] [Alice]
-  (tap Me)
+> What was the frame score?
+  Reply in the format your frames : Alice's frames, e.g. 2:2
+  > 3:2
 > Was there a notable highest break?  [Yes] [No]
   (tap Yes)
 > Who scored the highest break?  [Me] [Alice]
   (tap Me)
 > What was the break value?
   > 58
-✅ Frame saved!
+✅ Result saved!
 📅 Date: 2026-06-13
 🆚 Opponent: Alice
 ▶️ Opened: You
-🏆 Winner: You
+🏆 Score: You 3 - 2 Alice
 💥 Highest break: 58 (You)
 
-Add another frame for the same date & opponent?  [Yes] [No]
+Add another session for the same date & opponent?  [Yes] [No]
 ```
 
 Then later:
@@ -172,15 +173,16 @@ Then later:
   (tap Alice)
 
 🎱 Head-to-head vs Alice
-Frames played: 12
-Your wins: 7
-Alice's wins: 5
-Your win rate: 58.3%
+Sessions played: 12
+Frames played: 58
+Your frame wins: 32
+Alice's frame wins: 26
+Your win rate: 55.2%
 Recent form (most recent first): WWLWL
 
 Break performance:
-When you broke first: 4/6 won (67%)
-When Alice broke first: 3/6 won by you (50%)
+When you broke first: 18/30 won (60%)
+When Alice broke first: 14/28 won by you (50%)
 
 Highest breaks:
 Yours: 58
